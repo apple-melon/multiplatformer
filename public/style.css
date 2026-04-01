@@ -296,3 +296,64 @@ kbd {
 #btn-send:hover {
   background: rgba(88, 166, 255, 0.5);
 }
+
+.minigame-bar {
+  width: min(1280px, 100%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  justify-content: center;
+  padding: 0.25rem 0;
+}
+
+.minigame-bar button {
+  padding: 0.35rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  background: rgba(22, 27, 34, 0.9);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.minigame-bar button:hover {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.15);
+}
+
+.minigame-bar button.voted {
+  border-color: #6ecf8b;
+  color: #6ecf8b;
+}
+
+.mode-status {
+  width: min(1280px, 100%);
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--muted);
+  min-height: 1.25em;
+}
+
+.game-toast {
+  position: fixed;
+  top: 5.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 0.6rem 1.2rem;
+  border-radius: 10px;
+  background: rgba(22, 27, 34, 0.95);
+  border: 1px solid rgba(255, 200, 120, 0.45);
+  color: #ffe4b8;
+  font-size: 0.9rem;
+  font-weight: 600;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.game-toast.show {
+  opacity: 1;
+}

@@ -35,7 +35,10 @@
   let waterZones = [];
   let jumpPads = [];
   let cannons = [];
+  let worldBounds = { minX: -80, maxX: 8800, fallY: 1300 };
+  let finishX = 0;
   let displayPlayers = new Map();
+  let myVoteMode = '';
   let localPred = null;
   let timeSkew = 0;
   let camera = { x: 0, y: 0 };
@@ -45,9 +48,55 @@
   let predJump = false;
   let predPush = false;
   const particles = [];
+  let voteModesRef = [];
+
+  const minigameBarEl = document.getElementById('minigame-bar');
+  const modeStatusEl = document.getElementById('mode-status');
+  const toastEl = document.getElementById('game-toast');
 
   function estServerTime() {
     return Date.now() + timeSkew;
+  }
+
+  function applyLevelPack(data) {
+    if (!data) return;
+    if (data.platforms) staticPlats = data.platforms;
+    if (data.movingDefs) movingDefs = data.movingDefs;
+    if (data.spikes) spikes = data.spikes;
+    if (data.water) waterZones = data.water;
+    if (data.jumpPads) jumpPads = data.jumpPads;
+    if (data.cannons) cannons = data.cannons;
+    if (data.world) worldBounds = { ...data.world };
+    finishX = data.finishX || 0;
+  }
+
+  function showToast(msg) {
+    if (!toastEl) return;
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    window.clearTimeout(showToast._t);
+    showToast._t = window.setTimeout(() => toastEl.classList.remove('show'), 3200);
+  }
+
+  function buildVoteBar(modes) {
+    voteModesRef = modes || [];
+    if (!minigameBarEl || !modes) return;
+    minigameBarEl.innerHTML = '';
+    modes.forEach((m, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = `${i + 1}. ${m.label}`;
+      b.dataset.mode = m.id;
+      b.addEventListener('click', () => {
+        if (!socket || !myId) return;
+        myVoteMode = m.id;
+        socket.emit('voteMode', { modeId: m.id });
+        minigameBarEl.querySelectorAll('button').forEach((btn) => {
+          btn.classList.toggle('voted', btn.dataset.mode === myVoteMode);
+        });
+      });
+      minigameBarEl.appendChild(b);
+    });
   }
 
   function movingPlatRect(m, tMs) {
@@ -131,13 +180,22 @@
     const p = localPred;
     const inWater = centerInWater(p);
 
+    const wasSliding = p.sliding;
     const slideWant = !!(inp.down && p.onGround);
-    if (slideWant) {
+    if (slideWant && p.onGround) {
+      if (!wasSliding) {
+        const feetY = p.y + p.h;
+        p.h = C.playerSlideH;
+        p.y = feetY - p.h;
+      }
       p.sliding = true;
-      p.h = C.playerSlideH;
     } else {
+      if (wasSliding) {
+        const feetY = p.y + p.h;
+        p.h = C.playerH;
+        p.y = feetY - p.h;
+      }
       p.sliding = false;
-      p.h = C.playerH;
     }
 
     const g = inWater ? C.gravity * C.waterGravityMult : C.gravity;
@@ -192,9 +250,10 @@
 
     applyCannonsPred(p, tMs);
 
-    p.x = Math.max(-80, Math.min(8800 - p.w, p.x));
-    if (p.y > 1300) {
-      p.x = 200;
+    const w = worldBounds;
+    p.x = Math.max(w.minX, Math.min(w.maxX - p.w, p.x));
+    if (p.y > w.fallY) {
+      p.x = w.minX + 80;
       p.y = 400;
       p.vx = 0;
       p.vy = 0;
@@ -288,7 +347,7 @@
             vy: p.vy,
             facing: p.facing,
             onGround: p.onGround,
-            sliding: false,
+            sliding: !!p.sliding,
             h: p.h,
             w: p.w,
             cannonCooldownUntil: 0,
@@ -308,6 +367,9 @@
             localPred.vx = p.vx;
             localPred.vy = p.vy;
             localPred.onGround = p.onGround;
+            localPred.sliding = !!p.sliding;
+            localPred.h = p.h;
+            localPred.w = p.w;
           } else if (err > 4) {
             localPred.x += ex * 0.28;
             localPred.y += ey * 0.28;
@@ -429,8 +491,19 @@
     ctx.textAlign = 'left';
   }
 
-  function drawPushCooldownGauge(d, ox, oy, dw, isLocal) {
-    if (!isLocal || d.pushCdLeft == null || d.pushCdLeft <= 0) return;
+  function getDrawAnim(d, isSelfView) {
+    if (d.anim === 'push') return 'push';
+    if (isSelfView && localPred) {
+      if (!localPred.onGround) return 'jump';
+      if (localPred.sliding) return 'slide';
+      if (Math.abs(localPred.vx) > 40) return 'run';
+      return 'idle';
+    }
+    return d.anim;
+  }
+
+  function drawPushCooldownGauge(d, ox, oy, dw, isSelfView) {
+    if (!isSelfView || d.pushCdLeft == null || d.pushCdLeft <= 0) return;
     const maxCd = 1600;
     const t = Math.min(1, d.pushCdLeft / maxCd);
     const gw = 44;
@@ -446,25 +519,27 @@
     ctx.fillRect(gx, gy, gw * (1 - t), gh);
   }
 
-  function drawPlayer(d, camX, camY, isLocal) {
-    const px = isLocal && localPred ? localPred.x : d.dx;
-    const py = isLocal && localPred ? localPred.y : d.dy;
+  function drawPlayer(d, camX, camY, isSelfView) {
+    const px = isSelfView && localPred ? localPred.x : d.dx;
+    const py = isSelfView && localPred ? localPred.y : d.dy;
     const x = px - camX;
     const y = py - camY;
-    const w = isLocal && localPred ? localPred.w : d.w;
-    const h = isLocal && localPred ? localPred.h : d.h;
+    const w = isSelfView && localPred ? localPred.w : d.w;
+    const h = isSelfView && localPred ? localPred.h : d.h;
+    const facing = isSelfView && localPred ? localPred.facing : d.facing;
+    const anim = getDrawAnim(d, isSelfView);
     let sx = 1;
     let sy = 1;
-    if (d.anim === 'push') {
+    if (anim === 'push') {
       sx = 1.18;
       sy = 0.92;
-    } else if (d.anim === 'jump') {
+    } else if (anim === 'jump') {
       sy = 1.08;
       sx = 0.92;
-    } else if (d.anim === 'slide') {
+    } else if (anim === 'slide') {
       sy = 0.65;
       sx = 1.12;
-    } else if (d.anim === 'run') {
+    } else if (anim === 'run') {
       const bob = Math.sin(performance.now() / 60) * 0.04;
       sy = 1 + bob;
     } else {
@@ -476,15 +551,22 @@
     const ox = x + (w - dw) / 2;
     const oy = y + (h - dh);
 
-    if (d.anim === 'push') {
+    if (d.isIt) {
+      ctx.strokeStyle = 'rgba(255, 140, 60, 0.95)';
+      ctx.lineWidth = 4;
+      drawRoundedRect(ox - 4, oy - 4, dw + 8, dh + 8, 12);
+      ctx.stroke();
+    }
+
+    if (anim === 'push') {
       ctx.save();
       ctx.strokeStyle = 'rgba(255,200,120,0.85)';
       ctx.lineWidth = 3;
       ctx.beginPath();
-      const hx = ox + (d.facing > 0 ? dw : 0);
+      const hx = ox + (facing > 0 ? dw : 0);
       const hy = oy + dh * 0.45;
       ctx.moveTo(ox + dw / 2, oy + dh * 0.35);
-      ctx.lineTo(hx + d.facing * 22, hy);
+      ctx.lineTo(hx + facing * 22, hy);
       ctx.stroke();
       ctx.restore();
     }
@@ -499,20 +581,20 @@
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    const eyeX = ox + (d.facing > 0 ? dw * 0.58 : dw * 0.22);
+    const eyeX = ox + (facing > 0 ? dw * 0.58 : dw * 0.22);
     const eyeY = oy + dh * 0.32;
     ctx.fillStyle = 'rgba(15,20,30,0.9)';
     ctx.beginPath();
     ctx.arc(eyeX, eyeY, Math.max(2, dw * 0.08), 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(eyeX + d.facing * dw * 0.14, eyeY + 1, Math.max(1.5, dw * 0.05), 0, Math.PI * 2);
+    ctx.arc(eyeX + facing * dw * 0.14, eyeY + 1, Math.max(1.5, dw * 0.05), 0, Math.PI * 2);
     ctx.fill();
 
-    drawPushCooldownGauge(d, ox, oy, dw, isLocal);
+    drawPushCooldownGauge(d, ox, oy, dw, isSelfView);
 
     ctx.font = '600 11px Outfit, sans-serif';
-    ctx.fillStyle = isLocal ? 'rgba(255,255,255,0.95)' : 'rgba(230,235,245,0.88)';
+    ctx.fillStyle = isSelfView ? 'rgba(255,255,255,0.95)' : 'rgba(230,235,245,0.88)';
     ctx.textAlign = 'center';
     ctx.fillText(d.nickname, ox + dw / 2, oy - 8);
     ctx.textAlign = 'left';
@@ -651,6 +733,24 @@
     drawCannons(camX, camY);
     drawSpikes(camX, camY);
 
+    if (finishX > 0) {
+      const fx = finishX - camX;
+      if (fx > -20 && fx < CANVAS_W + 20) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 220, 100, 0.9)';
+        ctx.lineWidth = 4;
+        ctx.setLineDash([14, 10]);
+        ctx.beginPath();
+        ctx.moveTo(fx, 0);
+        ctx.lineTo(fx, CANVAS_H);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(255, 220, 100, 0.35)';
+        ctx.fillRect(fx - 3, 0, 6, CANVAS_H);
+        ctx.restore();
+      }
+    }
+
     const sorted = [...displayPlayers.values()].sort((a, b) => {
       const ay = a.id === myId && localPred ? localPred.y : a.dy;
       const by = b.id === myId && localPred ? localPred.y : b.dy;
@@ -701,7 +801,11 @@
       camera.x += (targetCamX - camera.x) * CAMERA_SMOOTH;
       camera.y += (targetCamY - camera.y) * CAMERA_SMOOTH;
       camera.y = Math.min(220, Math.max(-120, camera.y));
-      camera.x = Math.max(-100, Math.min(8200 - CANVAS_W + 100, camera.x));
+      const wx = worldBounds;
+      camera.x = Math.max(
+        wx.minX - 100,
+        Math.min(wx.maxX - CANVAS_W + 100, camera.x)
+      );
     } else if (me) {
       const targetCamX = me.dx + me.w / 2 - CANVAS_W / 2;
       const targetCamY = me.dy + me.h / 2 - CANVAS_H * 0.52;
@@ -737,18 +841,35 @@
     }
     socket.on('init', (data) => {
       myId = data.id;
-      staticPlats = data.platforms || [];
-      movingDefs = data.movingDefs || [];
-      spikes = data.spikes || [];
-      waterZones = data.water || [];
-      jumpPads = data.jumpPads || [];
-      cannons = data.cannons || [];
+      applyLevelPack(data);
       C = data.constants || null;
+      buildVoteBar(data.modes);
+    });
+
+    socket.on('level', (data) => {
+      applyLevelPack(data);
+    });
+
+    socket.on('toast', (t) => {
+      showToast(t.message || '');
     });
 
     socket.on('state', (pack) => {
       if (pack.serverTime != null) {
         timeSkew += (pack.serverTime - Date.now() - timeSkew) * 0.15;
+      }
+      if (pack.finishX !== undefined) finishX = pack.finishX;
+      if (modeStatusEl) {
+        if (pack.pendingMode && pack.modeSwitchAt) {
+          const left = Math.max(0, pack.modeSwitchAt - (Date.now() + timeSkew));
+          const sec = Math.ceil(left / 1000);
+          const meta = voteModesRef.find((m) => m.id === pack.pendingMode);
+          const lab = meta ? meta.label : pack.pendingMode;
+          modeStatusEl.textContent =
+            sec > 0 ? `${sec}초 후 「${lab}」 맵으로 변경 (과반 투표)` : '';
+        } else {
+          modeStatusEl.textContent = pack.modeLabel ? `모드: ${pack.modeLabel}` : '';
+        }
       }
       mergePlayers(pack.players || []);
     });
@@ -815,7 +936,21 @@
     if (e.target === chatInput) return;
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
-    if (e.code === 'ArrowDown') keys.down = true;
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = true;
+    const dk = e.code.match(/^Digit([1-5])$/);
+    if (dk && voteModesRef.length && socket && myId) {
+      const idx = parseInt(dk[1], 10) - 1;
+      const m = voteModesRef[idx];
+      if (m) {
+        myVoteMode = m.id;
+        socket.emit('voteMode', { modeId: m.id });
+        if (minigameBarEl) {
+          minigameBarEl.querySelectorAll('button').forEach((btn) => {
+            btn.classList.toggle('voted', btn.dataset.mode === myVoteMode);
+          });
+        }
+      }
+    }
     if (e.code === 'Space') {
       e.preventDefault();
       keys.jump = true;
@@ -826,7 +961,7 @@
   window.addEventListener('keyup', (e) => {
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
-    if (e.code === 'ArrowDown') keys.down = false;
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = false;
     if (e.code === 'Space') keys.jump = false;
     if (e.code === 'KeyF') keys.push = false;
   });

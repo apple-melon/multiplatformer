@@ -23,7 +23,7 @@
       <input type="text" id="nickname-input" maxlength="16" placeholder="닉네임 (최대 16자)" autocomplete="off" />
       <button type="button" id="btn-enter">입장</button>
       <p class="controls-hint">
-        이동: <kbd>A</kbd> <kbd>D</kbd> 또는 <kbd>←</kbd> <kbd>→</kbd> · 점프: <kbd>Space</kbd> · 슬라이드: 아래키 · 밀치기: <kbd>F</kbd>
+        이동: <kbd>A</kbd> <kbd>D</kbd> · 점프: <kbd>Space</kbd> · 슬라이드: <kbd>S</kbd> 또는 <kbd>↓</kbd> · 밀치기: <kbd>F</kbd> · 미니게임 투표: <kbd>1</kbd>–<kbd>5</kbd>
       </p>
     </div>
   </div>
@@ -33,6 +33,9 @@
       <span id="hud-nick"></span>
       <span id="hud-push" class="cooldown-pill" title="밀치기 쿨다운"></span>
     </div>
+    <div id="minigame-bar" class="minigame-bar" aria-label="미니게임 투표"></div>
+    <div id="mode-status" class="mode-status"></div>
+    <div id="game-toast" class="game-toast" aria-live="polite"></div>
     <canvas id="game" width="1280" height="720"></canvas>
     <div id="chat-panel">
       <div id="chat-log"></div>
