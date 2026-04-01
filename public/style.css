@@ -66,7 +66,7 @@ html, body {
 .modal {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 10000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -74,11 +74,18 @@ html, body {
   backdrop-filter: blur(6px);
 }
 
+body.modal-open #hud {
+  pointer-events: none;
+}
+
 .modal.hidden {
   display: none;
 }
 
 .modal-card {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
   width: min(420px, 92vw);
   padding: 2rem;
   border-radius: 16px;
@@ -132,6 +139,7 @@ html, body {
   cursor: pointer;
   background: linear-gradient(135deg, #388bfd, #8957e5);
   color: #fff;
+  touch-action: manipulation;
 }
 
 #btn-enter:hover {

@@ -52,6 +52,7 @@
   }
 
   nickInput.value = loadNick();
+  document.body.classList.add('modal-open');
 
   EMOJIS.forEach((e) => {
     const b = document.createElement('button');
@@ -311,11 +312,25 @@
   }
 
   function connectGame(nickname) {
+    if (typeof io !== 'function') {
+      window.alert(
+        'Socket.IO를 불러오지 못했습니다. 페이지를 새로고침하거나 서버 주소를 확인하세요.'
+      );
+      return;
+    }
     saveNick(nickname);
     hudNick.textContent = `닉네임: ${nickname}`;
     nickModal.classList.add('hidden');
+    document.body.classList.remove('modal-open');
 
-    socket = io();
+    try {
+      socket = io();
+    } catch (err) {
+      nickModal.classList.remove('hidden');
+      document.body.classList.add('modal-open');
+      window.alert('연결에 실패했습니다. 잠시 후 다시 시도하세요.');
+      return;
+    }
     socket.on('init', (data) => {
       myId = data.id;
       platforms = data.platforms || [];
@@ -421,8 +436,3 @@
     }
   });
 })();
-</think>
-game.js에 실수로 들어간 잘못된 코드를 제거하고, `keys` 초기화와 밀치기 쿨다운 표시를 수정합니다.
-
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-Read
