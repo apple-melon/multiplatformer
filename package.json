@@ -1,0 +1,17 @@
+{
+  "name": "multiplatformer",
+  "version": "1.0.0",
+  "description": "멀티플레이어 플랫포머 — 채팅, 밀치기, 슬라이드, 파티클, 평행 배경",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "socket.io": "^4.8.0"
+  }
+}

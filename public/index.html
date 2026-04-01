@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>멀티 플랫포머</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="parallax-bg" aria-hidden="true">
+    <div class="layer layer-far"></div>
+    <div class="layer layer-mid"></div>
+    <div class="layer layer-near"></div>
+  </div>
+
+  <div id="overlay-nickname" class="modal">
+    <div class="modal-card">
+      <h1>멀티 플랫포머</h1>
+      <p class="modal-hint">닉네임을 정한 뒤 입장하세요. 다른 플레이어와 함께 플레이됩니다.</p>
+      <input type="text" id="nickname-input" maxlength="16" placeholder="닉네임 (최대 16자)" autocomplete="off" />
+      <button type="button" id="btn-enter">입장</button>
+      <p class="controls-hint">
+        이동: <kbd>A</kbd> <kbd>D</kbd> 또는 <kbd>←</kbd> <kbd>→</kbd> · 점프: <kbd>Space</kbd> · 슬라이드: 아래키 · 밀치기: <kbd>F</kbd>
+      </p>
+    </div>
+  </div>
+
+  <div id="hud">
+    <div id="hud-top">
+      <span id="hud-nick"></span>
+      <span id="hud-push" class="cooldown-pill" title="밀치기 쿨다운"></span>
+    </div>
+    <canvas id="game" width="1280" height="720"></canvas>
+    <div id="chat-panel">
+      <div id="chat-log"></div>
+      <div id="chat-row">
+        <input type="text" id="chat-input" maxlength="200" placeholder="채팅 (Enter)" autocomplete="off" />
+        <div id="emoji-bar" title="이모티콘"></div>
+        <button type="button" id="btn-send">전송</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
