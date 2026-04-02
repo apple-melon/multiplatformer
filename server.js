@@ -14,13 +14,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const TICK_RATE = 60;
 const DT = 1 / TICK_RATE;
-const GRAVITY = 2280;
-const MOVE_ACCEL = 2800;
-const MAX_SPEED = 400;
-const AIR_CONTROL = 0.62;
-const JUMP_VELOCITY = -910;
-const JUMP_PAD_VELOCITY = -1080;
-const SLIDE_SPEED_MULT = 1.42;
+const GRAVITY = 2200;
+const MOVE_ACCEL = 3200;
+const MAX_SPEED = 455;
+const AIR_CONTROL = 0.66;
+const JUMP_VELOCITY = -975;
+const JUMP_PAD_VELOCITY = -1100;
+const SLIDE_SPEED_MULT = 1.45;
 const FRICTION_GROUND = 0.88;
 const AIR_FRICTION = 0.992;
 const PUSH_FORCE = 540;
@@ -31,18 +31,26 @@ const WATER_GRAVITY_MULT = 0.45;
 const WATER_DRAG_X = 0.88;
 const WATER_MAX_DOWN = 220;
 const BUBBLE_MS = 5500;
+const COYOTE_MS = 120;
+const DASH_IMPULSE = 540;
+const DASH_COOLDOWN_MS = 1100;
 
 const PLAYER_W = 34;
 const PLAYER_H = 50;
 const PLAYER_SLIDE_H = 24;
 
+const LOBBY_DURATION_MS = 12000;
+
 let currentLevel = getLevel('classic');
 let playerVotes = {};
-let pendingMode = null;
-let modeSwitchAt = 0;
 let taggerId = null;
 let raceCooldownUntil = 0;
 let tickCounter = 0;
+
+let sessionPhase = 'playing';
+let lobbyEndsAt = 0;
+let roundEndsAt = 0;
+let rotationIndex = 0;
 
 const players = {};
 const inputs = {};
@@ -54,6 +62,11 @@ const COLORS = [
 
 function serverTime() {
   return Date.now();
+}
+
+function roundDurationMs(modeId) {
+  if (modeId === 'race') return 95000;
+  return 78000;
 }
 
 function movingPlatRect(m, tMs) {
@@ -70,6 +83,7 @@ function allSolidRects(tMs) {
 }
 
 function spawnPlayer(p) {
+  if (p.spectator) return;
   const sp = currentLevel.spawn;
   p.x = sp.x + Math.random() * sp.w;
   p.y = sp.y;
@@ -79,32 +93,30 @@ function spawnPlayer(p) {
   p.sliding = false;
 }
 
-function loadMode(modeId) {
+function applyLevelData(modeId) {
   currentLevel = getLevel(modeId);
-  playerVotes = {};
-  pendingMode = null;
-  modeSwitchAt = 0;
   raceCooldownUntil = 0;
-  const ids = Object.keys(players);
-  if (currentLevel.id === 'tag' && ids.length > 0) {
-    taggerId = ids[Math.floor(Math.random() * ids.length)];
+  if (currentLevel.id === 'tag') {
+    const ids = Object.keys(players).filter((id) => !players[id].spectator);
+    taggerId = ids.length ? ids[Math.floor(Math.random() * ids.length)] : null;
   } else {
     taggerId = null;
   }
-  for (const p of Object.values(players)) spawnPlayer(p);
   io.emit('level', clientLevelPayload(currentLevel));
 }
 
-function scheduleModeSwitch(modeId, tMs) {
-  if (!MODE_ORDER.includes(modeId) || modeId === currentLevel.id || pendingMode) return;
-  pendingMode = modeId;
-  modeSwitchAt = tMs + 4000;
+function enterLobby(tMs, extraDelayMs) {
+  if (sessionPhase === 'lobby') return;
+  sessionPhase = 'lobby';
+  roundEndsAt = 0;
+  raceCooldownUntil = 0;
+  lobbyEndsAt = tMs + (extraDelayMs || 0) + LOBBY_DURATION_MS;
+  playerVotes = {};
+  io.emit('toast', { message: '로비 — 미니게임을 투표하세요' });
 }
 
-function checkVoteMajority(tMs) {
+function pickNextModeFromVotes() {
   const ids = Object.keys(players);
-  const n = ids.length;
-  if (n === 0 || pendingMode) return;
   const counts = {};
   for (const pid of ids) {
     const v = playerVotes[pid];
@@ -118,50 +130,44 @@ function checkVoteMajority(tMs) {
       best = k;
     }
   }
-  if (!best) return;
-  const need = n === 1 ? 1 : Math.floor(n / 2) + 1;
-  if (bc >= need) scheduleModeSwitch(best, tMs);
+  if (best && bc >= 1) return best;
+  return MODE_ORDER[rotationIndex % MODE_ORDER.length];
 }
 
-function looseOverlap(a, b, shrink) {
-  const sa = a.w * shrink;
-  const sb = b.w * shrink;
-  const ax = a.x + (a.w - sa) / 2;
-  const ay = a.y + (a.h - a.h * shrink) / 2;
-  const ah = a.h * shrink;
-  const bx = b.x + (b.w - sb) / 2;
-  const by = b.y + (b.h - b.h * shrink) / 2;
-  const bh = b.h * shrink;
-  return ax < bx + sb && ax + sa > bx && ay < by + bh && ay + ah > by;
-}
-
-function processTagMode() {
-  if (currentLevel.id !== 'tag' || !taggerId || !players[taggerId]) return;
-  const t = players[taggerId];
-  for (const pid of Object.keys(players)) {
-    if (pid === taggerId) continue;
-    const o = players[pid];
-    if (looseOverlap(t, o, 0.72)) {
-      taggerId = pid;
-      break;
-    }
-  }
-}
-
-function processRaceMode(tMs) {
-  const fx = currentLevel.finishX;
-  if (currentLevel.id !== 'race' || !fx || tMs < raceCooldownUntil) return;
+function startRoundFromLobby(tMs) {
+  const modeId = pickNextModeFromVotes();
+  playerVotes = {};
+  const mi = MODE_ORDER.indexOf(modeId);
+  if (mi >= 0) rotationIndex = (mi + 1) % MODE_ORDER.length;
+  applyLevelData(modeId);
   for (const p of Object.values(players)) {
-    if (p.x + p.w >= fx) {
-      io.emit('toast', { message: `${p.nickname} 결승!` });
-      raceCooldownUntil = tMs + 3500;
-      for (const pl of Object.values(players)) spawnPlayer(pl);
-      break;
-    }
+    p.spectator = false;
+    spawnPlayer(p);
   }
+  sessionPhase = 'playing';
+  lobbyEndsAt = 0;
+  roundEndsAt = tMs + roundDurationMs(modeId);
 }
 
-function createPlayer(socketId, nickname) {
+function serverPublicSession(tMs) {
+  return {
+    sessionPhase,
+    lobbyEndsAt: sessionPhase === 'lobby' ? lobbyEndsAt : 0,
+    roundEndsAt: sessionPhase === 'playing' ? roundEndsAt : 0,
+  };
+}
+
+function spawnSpectator(p) {
+  const sp = currentLevel.spawn;
+  p.x = sp.x + sp.w / 2;
+  p.y = sp.y - 300;
+  p.vx = 0;
+  p.vy = 0;
+  p.h = PLAYER_H;
+  p.sliding = false;
+}
+
+function createPlayer(socketId, nickname, asSpectator) {
   const p = {
     id: socketId,
     nickname: (nickname || '플레이어').slice(0, 16),
@@ -172,8 +178,11 @@ function createPlayer(socketId, nickname) {
     facing: 1,
     onGround: false,
     sliding: false,
+    spectator: !!asSpectator,
     color: COLORS[Math.floor(Math.random() * COLORS.length)],
     lastPush: -PUSH_COOLDOWN_MS,
+    lastDash: -DASH_COOLDOWN_MS,
+    lastGroundedAt: -1e12,
     w: PLAYER_W,
     h: PLAYER_H,
     bubbleText: '',
@@ -182,7 +191,8 @@ function createPlayer(socketId, nickname) {
     lastCannonIdx: -1,
     cannonCooldownUntil: 0,
   };
-  spawnPlayer(p);
+  if (p.spectator) spawnSpectator(p);
+  else spawnPlayer(p);
   return p;
 }
 
@@ -235,6 +245,7 @@ function resolveY(p, rects) {
 }
 
 function hitSpikes(p) {
+  if (p.spectator) return false;
   for (const s of currentLevel.spikes) {
     if (rectOverlap(p.x + 4, p.y + 4, p.w - 8, p.h - 8, s.x, s.y, s.w, s.h)) return true;
   }
@@ -246,7 +257,7 @@ function respawn(p) {
 }
 
 function applyCannons(p, tMs) {
-  if (tMs < p.cannonCooldownUntil) return;
+  if (p.spectator || tMs < p.cannonCooldownUntil) return;
   for (let i = 0; i < currentLevel.cannons.length; i++) {
     const c = currentLevel.cannons[i];
     if (rectOverlap(p.x, p.y, p.w, p.h, c.x, c.y, c.w, c.h)) {
@@ -260,9 +271,10 @@ function applyCannons(p, tMs) {
 }
 
 function computeAnim(p, tMs) {
+  if (p.spectator) return 'idle';
   if (tMs < p.pushAnimUntil) return 'push';
-  if (!p.onGround) return 'jump';
   if (p.sliding) return 'slide';
+  if (!p.onGround) return 'jump';
   if (Math.abs(p.vx) > 40) return 'run';
   return 'idle';
 }
@@ -270,12 +282,14 @@ function computeAnim(p, tMs) {
 function publicState(now) {
   const tMs = now;
   const moving = currentLevel.movingDefs.map((m) => movingPlatRect(m, tMs));
+  const sess = serverPublicSession(tMs);
   return {
     serverTime: tMs,
+    ...sess,
     mode: currentLevel.id,
     modeLabel: currentLevel.label,
-    pendingMode: pendingMode || '',
-    modeSwitchAt: pendingMode ? modeSwitchAt : 0,
+    pendingMode: '',
+    modeSwitchAt: 0,
     taggerId: currentLevel.id === 'tag' ? taggerId || '' : '',
     finishX: currentLevel.finishX || 0,
     movingPlats: moving,
@@ -292,7 +306,9 @@ function publicState(now) {
       anim: computeAnim(p, tMs),
       w: p.w,
       h: p.h,
+      spectator: !!p.spectator,
       pushCdLeft: Math.max(0, PUSH_COOLDOWN_MS - (tMs - p.lastPush)),
+      dashCdLeft: Math.max(0, DASH_COOLDOWN_MS - (tMs - p.lastDash)),
       cannonCooldownUntil: p.cannonCooldownUntil || 0,
       bubbleText: tMs < p.bubbleUntil ? p.bubbleText : '',
       bubbleUntil: p.bubbleUntil,
@@ -302,17 +318,23 @@ function publicState(now) {
 }
 
 function applyPhysics(p, inp, tMs) {
-  const inWater = centerInWater(p);
-  const wasSliding = p.sliding;
-  const slideWant = !!(inp.down && p.onGround);
+  if (p.spectator) return;
 
-  if (slideWant && p.onGround) {
-    if (!wasSliding) {
+  const coyoteJump =
+    p.onGround ||
+    (p.lastGroundedAt > -1e11 && tMs - p.lastGroundedAt < COYOTE_MS);
+
+  const wasSliding = p.sliding;
+  const slideWant = !!(inp.down && (p.onGround || wasSliding));
+
+  if (slideWant) {
+    if (!wasSliding && p.onGround) {
       const feetY = p.y + p.h;
       p.h = PLAYER_SLIDE_H;
       p.y = feetY - p.h;
     }
     p.sliding = true;
+    p.h = PLAYER_SLIDE_H;
   } else {
     if (wasSliding) {
       const feetY = p.y + p.h;
@@ -322,6 +344,7 @@ function applyPhysics(p, inp, tMs) {
     p.sliding = false;
   }
 
+  const inWater = centerInWater(p);
   const g = inWater ? GRAVITY * WATER_GRAVITY_MULT : GRAVITY;
   const accel = p.onGround ? MOVE_ACCEL : MOVE_ACCEL * AIR_CONTROL;
   const maxSp = p.sliding ? MAX_SPEED * SLIDE_SPEED_MULT : MAX_SPEED;
@@ -346,14 +369,21 @@ function applyPhysics(p, inp, tMs) {
 
   if (Math.abs(p.vx) > maxSp) p.vx = Math.sign(p.vx) * maxSp;
 
-  if (inp.jumpQueued && p.onGround && !p.sliding) {
+  if (inp.dashQueued && tMs - p.lastDash >= DASH_COOLDOWN_MS) {
+    p.vx += p.facing * DASH_IMPULSE;
+    if (Math.abs(p.vx) > maxSp * 1.35) p.vx = Math.sign(p.vx) * maxSp * 1.35;
+    p.lastDash = tMs;
+  }
+
+  if (inp.jumpQueued && coyoteJump && !p.sliding) {
     p.vy = JUMP_VELOCITY;
     p.onGround = false;
+    p.lastGroundedAt = -1e12;
   }
 
   if (inp.pushQueued && tMs - p.lastPush >= PUSH_COOLDOWN_MS) {
     for (const other of Object.values(players)) {
-      if (other.id === p.id) continue;
+      if (other.id === p.id || other.spectator) continue;
       const cx = p.x + p.w / 2;
       const cy = p.y + p.h / 2;
       const ox = other.x + other.w / 2;
@@ -382,6 +412,7 @@ function applyPhysics(p, inp, tMs) {
   p.onGround = resolveY(p, solids);
 
   if (p.onGround) {
+    p.lastGroundedAt = tMs;
     const fx = p.x + 4;
     const fy = p.y + p.h - 6;
     for (const pad of currentLevel.jumpPads) {
@@ -402,21 +433,69 @@ function applyPhysics(p, inp, tMs) {
   if (p.y > w.fallY) respawn(p);
 }
 
+function looseOverlap(a, b, shrink) {
+  const sa = a.w * shrink;
+  const sb = b.w * shrink;
+  const ax = a.x + (a.w - sa) / 2;
+  const ay = a.y + (a.h - a.h * shrink) / 2;
+  const ah = a.h * shrink;
+  const bx = b.x + (b.w - sb) / 2;
+  const by = b.y + (b.h - b.h * shrink) / 2;
+  const bh = b.h * shrink;
+  return ax < bx + sb && ax + sa > bx && ay < by + bh && ay + ah > by;
+}
+
+function processTagMode() {
+  if (currentLevel.id !== 'tag' || !taggerId || !players[taggerId]) return;
+  const t = players[taggerId];
+  if (t.spectator) return;
+  for (const pid of Object.keys(players)) {
+    if (pid === taggerId) continue;
+    const o = players[pid];
+    if (o.spectator) continue;
+    if (looseOverlap(t, o, 0.72)) {
+      taggerId = pid;
+      break;
+    }
+  }
+}
+
+function processRaceMode(tMs) {
+  const fx = currentLevel.finishX;
+  if (currentLevel.id !== 'race' || !fx || tMs < raceCooldownUntil) return;
+  for (const p of Object.values(players)) {
+    if (p.spectator) continue;
+    if (p.x + p.w >= fx) {
+      io.emit('toast', { message: `${p.nickname} 결승!` });
+      raceCooldownUntil = tMs + 999999;
+      enterLobby(tMs, 2800);
+      break;
+    }
+  }
+}
+
 io.on('connection', (socket) => {
   socket.on('join', ({ nickname }) => {
-    players[socket.id] = createPlayer(socket.id, nickname);
+    const asSpec = sessionPhase === 'playing';
+    players[socket.id] = createPlayer(socket.id, nickname, asSpec);
     inputs[socket.id] = {
       left: false,
       right: false,
       down: false,
       jumpQueued: false,
       pushQueued: false,
+      dashQueued: false,
     };
     if (currentLevel.id === 'tag' && !taggerId) {
-      taggerId = socket.id;
+      const ids = Object.keys(players).filter((id) => !players[id].spectator);
+      if (ids.length) taggerId = ids[Math.floor(Math.random() * ids.length)];
+    }
+    if (!roundEndsAt && sessionPhase === 'playing') {
+      roundEndsAt = serverTime() + roundDurationMs(currentLevel.id);
     }
     socket.emit('init', {
       id: socket.id,
+      spectator: players[socket.id].spectator,
       ...clientLevelPayload(currentLevel),
       tickRate: TICK_RATE,
       constants: {
@@ -435,26 +514,31 @@ io.on('connection', (socket) => {
         playerW: PLAYER_W,
         playerH: PLAYER_H,
         playerSlideH: PLAYER_SLIDE_H,
+        coyoteMs: COYOTE_MS,
+        dashImpulse: DASH_IMPULSE,
+        dashCdMs: DASH_COOLDOWN_MS,
       },
       modes: MODES_UI,
+      session: serverPublicSession(serverTime()),
     });
     io.emit('state', publicState(serverTime()));
   });
 
   socket.on('input', (inp) => {
     const cur = inputs[socket.id];
-    if (!cur || !players[socket.id]) return;
+    const pl = players[socket.id];
+    if (!cur || !pl || pl.spectator) return;
     if (inp.left !== undefined) cur.left = !!inp.left;
     if (inp.right !== undefined) cur.right = !!inp.right;
     if (inp.down !== undefined) cur.down = !!inp.down;
     if (inp.jump) cur.jumpQueued = true;
     if (inp.push) cur.pushQueued = true;
+    if (inp.dash) cur.dashQueued = true;
   });
 
   socket.on('voteMode', ({ modeId }) => {
-    if (!players[socket.id] || !MODE_ORDER.includes(modeId)) return;
+    if (!players[socket.id] || sessionPhase !== 'lobby' || !MODE_ORDER.includes(modeId)) return;
     playerVotes[socket.id] = modeId;
-    checkVoteMajority(serverTime());
   });
 
   socket.on('chat', (payload) => {
@@ -479,7 +563,7 @@ io.on('connection', (socket) => {
     delete inputs[socket.id];
     delete playerVotes[socket.id];
     if (taggerId === socket.id) {
-      const ids = Object.keys(players);
+      const ids = Object.keys(players).filter((id) => !players[id].spectator);
       taggerId = ids.length ? ids[Math.floor(Math.random() * ids.length)] : null;
     }
     io.emit('state', publicState(serverTime()));
@@ -488,10 +572,15 @@ io.on('connection', (socket) => {
 
 setInterval(() => {
   const tMs = serverTime();
-  if (pendingMode && tMs >= modeSwitchAt) {
-    loadMode(pendingMode);
-    pendingMode = null;
-    modeSwitchAt = 0;
+
+  if (sessionPhase === 'lobby' && lobbyEndsAt > 0 && tMs >= lobbyEndsAt) {
+    startRoundFromLobby(tMs);
+    raceCooldownUntil = 0;
+  }
+
+  if (sessionPhase === 'playing' && roundEndsAt > 0 && tMs >= roundEndsAt) {
+    enterLobby(tMs, 0);
+    raceCooldownUntil = 0;
   }
 
   for (const id of Object.keys(players)) {
@@ -501,15 +590,12 @@ setInterval(() => {
     applyPhysics(p, inp, tMs);
     inp.jumpQueued = false;
     inp.pushQueued = false;
+    inp.dashQueued = false;
   }
 
-  processTagMode();
-  processRaceMode(tMs);
-
-  tickCounter += 1;
-  if (tickCounter >= TICK_RATE) {
-    tickCounter = 0;
-    checkVoteMajority(tMs);
+  if (sessionPhase === 'playing') {
+    processTagMode();
+    processRaceMode(tMs);
   }
 
   io.emit('state', publicState(tMs));

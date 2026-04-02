@@ -42,17 +42,22 @@
   let localPred = null;
   let timeSkew = 0;
   let camera = { x: 0, y: 0 };
-  let keys = { left: false, right: false, down: false, jump: false, push: false };
+  let keys = { left: false, right: false, down: false, jump: false, push: false, dash: false };
   let lastJump = false;
   let lastPush = false;
+  let lastDash = false;
   let predJump = false;
   let predPush = false;
+  let predDash = false;
+  let amSpectator = false;
+  let sessionPhaseRef = 'playing';
   const particles = [];
   let voteModesRef = [];
 
   const minigameBarEl = document.getElementById('minigame-bar');
   const modeStatusEl = document.getElementById('mode-status');
   const toastEl = document.getElementById('game-toast');
+  const spectateBannerEl = document.getElementById('spectate-banner');
 
   function estServerTime() {
     return Date.now() + timeSkew;
@@ -78,6 +83,25 @@
     showToast._t = window.setTimeout(() => toastEl.classList.remove('show'), 3200);
   }
 
+  function updateSessionUI(pack) {
+    sessionPhaseRef = pack.sessionPhase || 'playing';
+    const lobby = sessionPhaseRef === 'lobby';
+    if (minigameBarEl) minigameBarEl.classList.toggle('lobby-visible', lobby);
+    if (spectateBannerEl) spectateBannerEl.classList.toggle('visible', amSpectator);
+    if (!modeStatusEl) return;
+    if (lobby && pack.lobbyEndsAt) {
+      const left = Math.max(0, pack.lobbyEndsAt - (Date.now() + timeSkew));
+      const sec = Math.ceil(left / 1000);
+      modeStatusEl.textContent = `로비 — ${sec}초 후 다음 미니게임 (투표 반영)`;
+    } else if (pack.roundEndsAt && sessionPhaseRef === 'playing') {
+      const left = Math.max(0, pack.roundEndsAt - (Date.now() + timeSkew));
+      const sec = Math.ceil(left / 1000);
+      modeStatusEl.textContent = `${pack.modeLabel || ''} · ${sec}초 후 라운드 종료`;
+    } else {
+      modeStatusEl.textContent = pack.modeLabel ? `모드: ${pack.modeLabel}` : '';
+    }
+  }
+
   function buildVoteBar(modes) {
     voteModesRef = modes || [];
     if (!minigameBarEl || !modes) return;
@@ -88,7 +112,7 @@
       b.textContent = `${i + 1}. ${m.label}`;
       b.dataset.mode = m.id;
       b.addEventListener('click', () => {
-        if (!socket || !myId) return;
+        if (!socket || !myId || sessionPhaseRef !== 'lobby') return;
         myVoteMode = m.id;
         socket.emit('voteMode', { modeId: m.id });
         minigameBarEl.querySelectorAll('button').forEach((btn) => {
@@ -176,19 +200,24 @@
   }
 
   function simulateLocalPred(inp, dt, tMs) {
-    if (!localPred || !C) return;
+    if (!localPred || !C || amSpectator) return;
     const p = localPred;
-    const inWater = centerInWater(p);
+    const coyoteMs = C.coyoteMs != null ? C.coyoteMs : 120;
+    const coyoteJump =
+      p.onGround ||
+      (p.lastGroundedAt > 0 && tMs - p.lastGroundedAt < coyoteMs);
 
     const wasSliding = p.sliding;
-    const slideWant = !!(inp.down && p.onGround);
-    if (slideWant && p.onGround) {
-      if (!wasSliding) {
+    const slideWant = !!(inp.down && (p.onGround || wasSliding));
+
+    if (slideWant) {
+      if (!wasSliding && p.onGround) {
         const feetY = p.y + p.h;
         p.h = C.playerSlideH;
         p.y = feetY - p.h;
       }
       p.sliding = true;
+      p.h = C.playerSlideH;
     } else {
       if (wasSliding) {
         const feetY = p.y + p.h;
@@ -198,6 +227,7 @@
       p.sliding = false;
     }
 
+    const inWater = centerInWater(p);
     const g = inWater ? C.gravity * C.waterGravityMult : C.gravity;
     const accel = p.onGround ? C.moveAccel : C.moveAccel * C.airControl;
     const maxSp = p.sliding ? C.maxSpeed * C.slideMult : C.maxSpeed;
@@ -222,9 +252,19 @@
 
     if (Math.abs(p.vx) > maxSp) p.vx = Math.sign(p.vx) * maxSp;
 
-    if (inp.jumpQueued && p.onGround && !p.sliding) {
+    const dashCd = C.dashCdMs != null ? C.dashCdMs : 1100;
+    const dashImp = C.dashImpulse != null ? C.dashImpulse : 540;
+    if (inp.dashQueued && tMs - p.lastDash >= dashCd) {
+      p.vx += p.facing * dashImp;
+      const cap = maxSp * 1.35;
+      if (Math.abs(p.vx) > cap) p.vx = Math.sign(p.vx) * cap;
+      p.lastDash = tMs;
+    }
+
+    if (inp.jumpQueued && coyoteJump && !p.sliding) {
       p.vy = C.jumpVel;
       p.onGround = false;
+      p.lastGroundedAt = -1e12;
     }
 
     p.vy += g * dt;
@@ -237,6 +277,7 @@
     p.onGround = resolveYPlayer(p, solids);
 
     if (p.onGround) {
+      p.lastGroundedAt = tMs;
       const fx = p.x + 4;
       const fy = p.y + p.h - 6;
       for (const pad of jumpPads) {
@@ -340,41 +381,69 @@
           prevOnGround: p.anim !== 'jump',
         });
         if (p.id === myId) {
-          localPred = {
-            x: p.x,
-            y: p.y,
-            vx: p.vx,
-            vy: p.vy,
-            facing: p.facing,
-            onGround: p.onGround,
-            sliding: !!p.sliding,
-            h: p.h,
-            w: p.w,
-            cannonCooldownUntil: 0,
-          };
+          amSpectator = !!p.spectator;
+          if (p.spectator) {
+            localPred = null;
+          } else {
+            localPred = {
+              x: p.x,
+              y: p.y,
+              vx: p.vx,
+              vy: p.vy,
+              facing: p.facing,
+              onGround: p.onGround,
+              sliding: !!p.sliding,
+              h: p.h,
+              w: p.w,
+              cannonCooldownUntil: 0,
+              lastGroundedAt: p.onGround ? estServerTime() : -1e12,
+              lastDash: -1e12,
+            };
+          }
         }
       } else {
         const d = displayPlayers.get(p.id);
         const wasGround = d.prevOnGround;
         const nowGround = p.anim !== 'jump';
-        if (p.id === myId && localPred) {
-          const ex = p.x - localPred.x;
-          const ey = p.y - localPred.y;
-          const err = Math.hypot(ex, ey);
-          if (err > 100) {
-            localPred.x = p.x;
-            localPred.y = p.y;
-            localPred.vx = p.vx;
-            localPred.vy = p.vy;
-            localPred.onGround = p.onGround;
-            localPred.sliding = !!p.sliding;
-            localPred.h = p.h;
-            localPred.w = p.w;
-          } else if (err > 4) {
-            localPred.x += ex * 0.28;
-            localPred.y += ey * 0.28;
-            localPred.vx = p.vx * 0.2 + localPred.vx * 0.8;
-            localPred.vy = p.vy * 0.2 + localPred.vy * 0.8;
+        if (p.id === myId) {
+          amSpectator = !!p.spectator;
+          if (p.spectator) {
+            localPred = null;
+          } else if (localPred) {
+            const ex = p.x - localPred.x;
+            const ey = p.y - localPred.y;
+            const err = Math.hypot(ex, ey);
+            if (err > 100) {
+              localPred.x = p.x;
+              localPred.y = p.y;
+              localPred.vx = p.vx;
+              localPred.vy = p.vy;
+              localPred.onGround = p.onGround;
+              localPred.sliding = !!p.sliding;
+              localPred.h = p.h;
+              localPred.w = p.w;
+            } else if (err > 3) {
+              const blend = err > 35 ? 0.42 : 0.32;
+              localPred.x += ex * blend;
+              localPred.y += ey * blend;
+              localPred.vx = p.vx * 0.22 + localPred.vx * 0.78;
+              localPred.vy = p.vy * 0.22 + localPred.vy * 0.78;
+            }
+          } else {
+            localPred = {
+              x: p.x,
+              y: p.y,
+              vx: p.vx,
+              vy: p.vy,
+              facing: p.facing,
+              onGround: p.onGround,
+              sliding: !!p.sliding,
+              h: p.h,
+              w: p.w,
+              cannonCooldownUntil: p.cannonCooldownUntil || 0,
+              lastGroundedAt: p.onGround ? estServerTime() : -1e12,
+              lastDash: -1e12,
+            };
           }
         } else if (p.id !== myId) {
           if (nowGround && !wasGround) {
@@ -422,7 +491,7 @@
 
   function smoothRemotes(dt) {
     for (const [id, d] of displayPlayers) {
-      if (id === myId) continue;
+      if (id === myId || d.spectator) continue;
       const k = REMOTE_LERP;
       d.dx += (d.x - d.dx) * Math.min(1, k * (dt * 60));
       d.dy += (d.y - d.dy) * Math.min(1, k * (dt * 60));
@@ -494,8 +563,8 @@
   function getDrawAnim(d, isSelfView) {
     if (d.anim === 'push') return 'push';
     if (isSelfView && localPred) {
-      if (!localPred.onGround) return 'jump';
       if (localPred.sliding) return 'slide';
+      if (!localPred.onGround) return 'jump';
       if (Math.abs(localPred.vx) > 40) return 'run';
       return 'idle';
     }
@@ -520,6 +589,7 @@
   }
 
   function drawPlayer(d, camX, camY, isSelfView) {
+    if (d.spectator) return;
     const px = isSelfView && localPred ? localPred.x : d.dx;
     const py = isSelfView && localPred ? localPred.y : d.dy;
     const x = px - camX;
@@ -751,11 +821,13 @@
       }
     }
 
-    const sorted = [...displayPlayers.values()].sort((a, b) => {
-      const ay = a.id === myId && localPred ? localPred.y : a.dy;
-      const by = b.id === myId && localPred ? localPred.y : b.dy;
-      return ay - by;
-    });
+    const sorted = [...displayPlayers.values()]
+      .filter((pl) => !pl.spectator)
+      .sort((a, b) => {
+        const ay = a.id === myId && localPred ? localPred.y : a.dy;
+        const by = b.id === myId && localPred ? localPred.y : b.dy;
+        return ay - by;
+      });
     for (const d of sorted) {
       drawPlayer(d, camX, camY, d.id === myId);
     }
@@ -772,10 +844,12 @@
     const tMs = estServerTime();
     const jumpEdge = keys.jump && !predJump;
     const pushEdge = keys.push && !predPush;
+    const dashEdge = keys.dash && !predDash;
     predJump = keys.jump;
     predPush = keys.push;
+    predDash = keys.dash;
 
-    if (localPred && C) {
+    if (localPred && C && !amSpectator) {
       simulateLocalPred(
         {
           left: keys.left,
@@ -783,6 +857,7 @@
           down: keys.down,
           jumpQueued: jumpEdge,
           pushQueued: false,
+          dashQueued: dashEdge,
         },
         dt,
         tMs
@@ -793,9 +868,27 @@
     updateParticles(dt);
 
     const me = displayPlayers.get(myId);
+    const actives = [...displayPlayers.values()].filter((pl) => !pl.spectator);
     const px = localPred ? localPred.x + localPred.w / 2 : me ? me.dx + me.w / 2 : 0;
     const py = localPred ? localPred.y + localPred.h / 2 : me ? me.dy + me.h / 2 : 0;
-    if (me && localPred) {
+
+    if (amSpectator && actives.length > 0) {
+      let sx = 0;
+      let sy = 0;
+      for (const pl of actives) {
+        sx += pl.dx + pl.w / 2;
+        sy += pl.dy + pl.h / 2;
+      }
+      sx /= actives.length;
+      sy /= actives.length;
+      const targetCamX = sx - CANVAS_W / 2;
+      const targetCamY = sy - CANVAS_H * 0.52;
+      camera.x += (targetCamX - camera.x) * CAMERA_SMOOTH;
+      camera.y += (targetCamY - camera.y) * CAMERA_SMOOTH;
+      camera.y = Math.min(260, Math.max(-140, camera.y));
+      const wx = worldBounds;
+      camera.x = Math.max(wx.minX - 100, Math.min(wx.maxX - CANVAS_W + 100, camera.x));
+    } else if (me && localPred && !amSpectator) {
       const targetCamX = px - CANVAS_W / 2;
       const targetCamY = py - CANVAS_H * 0.52;
       camera.x += (targetCamX - camera.x) * CAMERA_SMOOTH;
@@ -806,7 +899,7 @@
         wx.minX - 100,
         Math.min(wx.maxX - CANVAS_W + 100, camera.x)
       );
-    } else if (me) {
+    } else if (me && !amSpectator) {
       const targetCamX = me.dx + me.w / 2 - CANVAS_W / 2;
       const targetCamY = me.dy + me.h / 2 - CANVAS_H * 0.52;
       camera.x += (targetCamX - camera.x) * CAMERA_SMOOTH;
@@ -841,9 +934,16 @@
     }
     socket.on('init', (data) => {
       myId = data.id;
+      amSpectator = !!data.spectator;
       applyLevelPack(data);
       C = data.constants || null;
       buildVoteBar(data.modes);
+      if (data.session) {
+        sessionPhaseRef = data.session.sessionPhase || 'playing';
+        if (minigameBarEl)
+          minigameBarEl.classList.toggle('lobby-visible', sessionPhaseRef === 'lobby');
+      }
+      if (spectateBannerEl) spectateBannerEl.classList.toggle('visible', amSpectator);
     });
 
     socket.on('level', (data) => {
@@ -859,19 +959,9 @@
         timeSkew += (pack.serverTime - Date.now() - timeSkew) * 0.15;
       }
       if (pack.finishX !== undefined) finishX = pack.finishX;
-      if (modeStatusEl) {
-        if (pack.pendingMode && pack.modeSwitchAt) {
-          const left = Math.max(0, pack.modeSwitchAt - (Date.now() + timeSkew));
-          const sec = Math.ceil(left / 1000);
-          const meta = voteModesRef.find((m) => m.id === pack.pendingMode);
-          const lab = meta ? meta.label : pack.pendingMode;
-          modeStatusEl.textContent =
-            sec > 0 ? `${sec}초 후 「${lab}」 맵으로 변경 (과반 투표)` : '';
-        } else {
-          modeStatusEl.textContent = pack.modeLabel ? `모드: ${pack.modeLabel}` : '';
-        }
-      }
       mergePlayers(pack.players || []);
+      updateSessionUI(pack);
+      if (spectateBannerEl) spectateBannerEl.classList.toggle('visible', amSpectator);
     });
 
     socket.on('chat', appendChat);
@@ -907,11 +997,13 @@
   }
 
   function tickInput() {
-    if (!socket || !myId) return;
+    if (!socket || !myId || amSpectator) return;
     const jumpEdge = keys.jump && !lastJump;
     const pushEdge = keys.push && !lastPush;
+    const dashEdge = keys.dash && !lastDash;
     lastJump = keys.jump;
     lastPush = keys.push;
+    lastDash = keys.dash;
 
     socket.emit('input', {
       left: keys.left,
@@ -919,6 +1011,7 @@
       down: keys.down,
       jump: jumpEdge,
       push: pushEdge,
+      dash: dashEdge,
     });
   }
 
@@ -937,8 +1030,19 @@
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
     if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = true;
+    if (e.code === 'KeyW' || e.code === 'ArrowUp') {
+      e.preventDefault();
+      keys.jump = true;
+    }
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.dash = true;
     const dk = e.code.match(/^Digit([1-5])$/);
-    if (dk && voteModesRef.length && socket && myId) {
+    if (
+      dk &&
+      voteModesRef.length &&
+      socket &&
+      myId &&
+      sessionPhaseRef === 'lobby'
+    ) {
       const idx = parseInt(dk[1], 10) - 1;
       const m = voteModesRef[idx];
       if (m) {
@@ -962,7 +1066,8 @@
     if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
     if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
     if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = false;
-    if (e.code === 'Space') keys.jump = false;
+    if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') keys.jump = false;
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') keys.dash = false;
     if (e.code === 'KeyF') keys.push = false;
   });
 
